@@ -208,8 +208,8 @@ fn format_lddw_arg(val: u64) -> String {
     format!("{}", signed)
 }
 
-/// Generate PQR IR corpus files into `output_dir`.
-pub fn generate(output_dir: &str) {
+/// Generate PQR IR corpus files into `output_dir`. Returns the next free index.
+pub fn generate(output_dir: &str) -> usize {
     let path = Path::new(output_dir);
     std::fs::create_dir_all(path).expect("failed to create output directory");
 
@@ -220,4 +220,5 @@ pub fn generate(output_dir: &str) {
     gen_divoverflow(path, &mut idx);
 
     println!("Generated {} PQR IR corpus entries in {}", idx, output_dir);
+    idx
 }

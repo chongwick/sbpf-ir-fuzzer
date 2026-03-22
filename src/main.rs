@@ -1,4 +1,5 @@
 mod executor;
+mod gen_corpus;
 mod gen_pqr;
 mod ir;
 mod mutator;
@@ -176,6 +177,7 @@ fn print_usage() {
     eprintln!("  sbpf-ir --exec <prog.json>                 Run interpreter/JIT diff test");
     eprintln!("  sbpf-ir --triage <file.ir>                  Triage: asm, disasm, verify, exec");
     eprintln!("  sbpf-ir --gen-pqr [output_dir]              Generate PQR IR corpus (default: input_corpus/)");
+    eprintln!("  sbpf-ir --gen-corpus [output_dir]            Generate full IR corpus (default: input_corpus/)");
 }
 
 fn main() {
@@ -191,6 +193,7 @@ fn main() {
     let mut exec_mode = false;
     let mut triage_mode = false;
     let mut gen_pqr_mode = false;
+    let mut gen_corpus_mode = false;
     let mut input_files: Vec<String> = Vec::new();
     let mut output_path: Option<String> = None;
     let mut seed: Option<u64> = None;
@@ -209,6 +212,9 @@ fn main() {
             }
             "--gen-pqr" => {
                 gen_pqr_mode = true;
+            }
+            "--gen-corpus" => {
+                gen_corpus_mode = true;
             }
             "--load" => {
                 load_mode = true;
@@ -262,6 +268,15 @@ fn main() {
     if gen_pqr_mode {
         let dir = input_files.first().map(|s| s.as_str()).unwrap_or("input_corpus");
         gen_pqr::generate(dir);
+        return;
+    }
+
+    // --gen-corpus mode
+    if gen_corpus_mode {
+        let dir = input_files.first().map(|s| s.as_str()).unwrap_or("input_corpus");
+        let pqr_count = gen_pqr::generate(dir);
+        let total = gen_corpus::generate(dir, pqr_count);
+        println!("Total: {} IR corpus files in {}", total, dir);
         return;
     }
 
