@@ -1,4 +1,5 @@
 mod executor;
+mod gen_pqr;
 mod ir;
 mod mutator;
 
@@ -174,6 +175,7 @@ fn print_usage() {
     eprintln!("  sbpf-ir --seed <N>                         Set RNG seed (with --mutate)");
     eprintln!("  sbpf-ir --exec <prog.json>                 Run interpreter/JIT diff test");
     eprintln!("  sbpf-ir --triage <file.ir>                  Triage: asm, disasm, verify, exec");
+    eprintln!("  sbpf-ir --gen-pqr [output_dir]              Generate PQR IR corpus (default: input_corpus/)");
 }
 
 fn main() {
@@ -188,6 +190,7 @@ fn main() {
     let mut load_mode = false;
     let mut exec_mode = false;
     let mut triage_mode = false;
+    let mut gen_pqr_mode = false;
     let mut input_files: Vec<String> = Vec::new();
     let mut output_path: Option<String> = None;
     let mut seed: Option<u64> = None;
@@ -203,6 +206,9 @@ fn main() {
             }
             "--triage" => {
                 triage_mode = true;
+            }
+            "--gen-pqr" => {
+                gen_pqr_mode = true;
             }
             "--load" => {
                 load_mode = true;
@@ -249,6 +255,13 @@ fn main() {
         println!("version: {}", ir.version);
         println!("memory: {:?}", ir.memory);
         print_ir(&ir);
+        return;
+    }
+
+    // --gen-pqr mode
+    if gen_pqr_mode {
+        let dir = input_files.first().map(|s| s.as_str()).unwrap_or("input_corpus");
+        gen_pqr::generate(dir);
         return;
     }
 
