@@ -1,8 +1,10 @@
 mod executor;
 mod gen_corpus;
 mod gen_pqr;
+mod gen_smart;
 mod ir;
 mod mutator;
+mod semantic_aware;
 
 use executor::{parse_sbpf_version, run_diff, run_diff_ir, triage_ir};
 use ir::{sbpf2ir, IrSeq};
@@ -178,6 +180,7 @@ fn print_usage() {
     eprintln!("  sbpf-ir --triage <file.ir>                  Triage: asm, disasm, verify, exec");
     eprintln!("  sbpf-ir --gen-pqr [output_dir]              Generate PQR IR corpus (default: input_corpus/)");
     eprintln!("  sbpf-ir --gen-corpus [output_dir]            Generate full IR corpus (default: input_corpus/)");
+    eprintln!("  sbpf-ir --gen-smart [output_dir]             Generate 1000 smart IR seeds (default: input_corpus/)");
 }
 
 fn main() {
@@ -194,9 +197,11 @@ fn main() {
     let mut triage_mode = false;
     let mut gen_pqr_mode = false;
     let mut gen_corpus_mode = false;
+    let mut gen_smart_mode = false;
     let mut input_files: Vec<String> = Vec::new();
     let mut output_path: Option<String> = None;
     let mut seed: Option<u64> = None;
+    let mut count: Option<usize> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -215,6 +220,18 @@ fn main() {
             }
             "--gen-corpus" => {
                 gen_corpus_mode = true;
+            }
+            "--gen-smart" => {
+                gen_smart_mode = true;
+            }
+            "--count" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --count requires a number");
+                    print_usage();
+                    std::process::exit(1);
+                }
+                count = Some(args[i].parse().expect("--count requires a number"));
             }
             "--load" => {
                 load_mode = true;
@@ -277,6 +294,18 @@ fn main() {
         let pqr_count = gen_pqr::generate(dir);
         let total = gen_corpus::generate(dir, pqr_count);
         println!("Total: {} IR corpus files in {}", total, dir);
+        return;
+    }
+
+    // --gen-smart mode
+    if gen_smart_mode {
+        let dir = input_files.first().map(|s| s.as_str()).unwrap_or("input_corpus");
+        let n = count.unwrap_or(1000);
+        let s = seed.unwrap_or_else(|| {
+            use rand::Rng;
+            rand::thread_rng().gen()
+        });
+        gen_smart::generate(dir, n, s);
         return;
     }
 

@@ -28,6 +28,8 @@ IR (intermediate representation) toolkit for [solana-sbpf](https://github.com/an
 | `executor` | Assembles IR back to bytecode, runs interpreter and JIT, compares results (return value, instruction count, memory). Panics on differential mismatches. |
 | `gen_pqr` | Generates IR corpus for PQR (product/quotient/remainder) instructions from `tests/execution.rs` test cases. Covers V0 div/mod/mul and V2 udiv/urem/sdiv/srem/lmul/shmul/uhmul. |
 | `gen_corpus` | Generates IR corpus for all remaining non-PQR inline-assembly tests from `tests/execution.rs`: ALU, logic, shifts, byte swaps, memory ops, control flow, stack/calls, instruction meter, programs (prime, subnet, TCP port 80, TCP SACK), and V0-specific instructions. |
+| `gen_smart` | Generates semantic-aware IR seeds using `arbitrary`-driven `FuzzProgram` construction. Produces verified, disassembled programs across all SBPF versions. |
+| `semantic_aware` | `FuzzProgram` and `make_program()` — structured instruction generation that produces valid SBPF programs via `arbitrary::Arbitrary`. |
 
 ### IR representation
 
@@ -60,6 +62,8 @@ sbpf-ir --exec <prog.json>                   Run interpreter/JIT diff test
 sbpf-ir --triage <file.ir>                   Triage: assemble, disassemble, verify, execute
 sbpf-ir --gen-pqr [output_dir]               Generate PQR IR corpus
 sbpf-ir --gen-corpus [output_dir]            Generate full IR corpus (PQR + general)
+sbpf-ir --gen-smart [output_dir]             Generate smart IR seeds (default: 1000)
+    [--count N] [--seed N]                   Optional count and RNG seed
 ```
 
 ### Examples
@@ -147,14 +151,60 @@ The `ir-jit-diff` fuzz target in `fuzz/fuzz_targets/` uses this crate:
 4. Interpreter and JIT execute the program
 5. Results are compared; mismatches trigger a panic (crash = bug found)
 
-To run the fuzzer:
+### Quick start
 
 ```bash
-# Generate seed corpus first
+cd tools
+./setup.sh
+cd ..
+python3 fuzz_loop.py
+```
+
+`setup.sh` builds the tools crate, builds the fuzz target, generates an initial IR corpus, and symlinks `fuzz_loop.py` to the repo root.
+
+### Autonomous fuzzing loop
+
+`fuzz_loop.py` runs an autonomous cycle of seed generation, fuzzing, and plateau detection:
+
+```
+┌──────────────────┐     ┌───────────────┐     ┌────────────────────┐
+│  Generate smart  │────►│  Run fuzzer   │────►│  Plateau detected  │──┐
+│  seeds (sbpf-ir) │     │  (libfuzzer)  │     │  or time expired   │  │
+└──────────────────┘     └───────────────┘     └────────────────────┘  │
+        ▲                                                              │
+        └──────────────────────────────────────────────────────────────┘
+```
+
+The `ir-jit-diff` target loads its corpus once at startup (`OnceLock`), so new seeds require a fuzzer restart. The loop handles this automatically.
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--corpus-dir` | `fuzz/ir-corpus` | IR corpus directory |
+| `--smart-count` | 1000 | Smart seeds generated per cycle |
+| `--plateau-secs` | 120 | Seconds without coverage increase to trigger restart |
+| `--max-cycle-secs` | 600 | Max seconds per fuzzer cycle |
+| `--cycles` | 0 (unlimited) | Number of cycles to run |
+
+**Examples:**
+
+```bash
+# Quick test: 2 short cycles
+python3 fuzz_loop.py --cycles 2 --plateau-secs 30 --max-cycle-secs 60 --smart-count 100
+
+# Full autonomous run (Ctrl+C to stop)
+python3 fuzz_loop.py
+```
+
+### Manual fuzzing
+
+```bash
+# Generate seed corpus
 cargo run --manifest-path tools/Cargo.toml -- --gen-corpus fuzz/ir-corpus
 
-# Run the fuzz target
-cargo +nightly fuzz run ir-jit-diff fuzz/ir-corpus
+# Run the fuzz target directly
+cargo +nightly fuzz run ir-jit-diff
 ```
 
 ## License
