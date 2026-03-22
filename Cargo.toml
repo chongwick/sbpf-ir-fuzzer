@@ -1,0 +1,17 @@
+[package]
+name = "sbpf-ir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+rand = "0.8"
+
+[dependencies.solana-sbpf]
+path = ".."
+features = ["fuzzer-not-safe-for-production"]
+
+[dependencies.test_utils]
+path = "../test_utils/"
