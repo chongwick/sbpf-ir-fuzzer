@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Autonomous fuzzing loop with plateau detection for ir-jit-diff.
 
-Cycles: generate smart IR seeds → run fuzzer → detect coverage plateau → restart.
-The ir-jit-diff fuzz target loads its IR corpus once at startup (OnceLock),
-so new seeds require a fuzzer restart to take effect.
+On coverage plateau: pauses the fuzzer (SIGSTOP), generates fresh smart seeds,
+then resumes (SIGCONT). The fuzz target periodically reloads its corpus from
+disk, so new seeds are picked up without losing accumulated coverage.
 
 Run from the repo root:  python3 fuzz_loop.py
 """
@@ -12,6 +12,7 @@ import argparse
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -47,9 +48,9 @@ def generate_seeds(args, rng_seed):
             log(line)
 
 
-def run_fuzzer_cycle(args, cycle_num, rng_seed):
-    """Run one fuzzer cycle. Returns final coverage value."""
-    generate_seeds(args, rng_seed)
+def run_fuzzer_cycle(args, cycle_num, initial_seed):
+    """Run one fuzzer cycle. Returns (final_cov, refresh_count)."""
+    generate_seeds(args, initial_seed)
 
     cmd = [
         "cargo", "+nightly", "fuzz", "run", "ir-jit-diff", "--",
@@ -64,10 +65,13 @@ def run_fuzzer_cycle(args, cycle_num, rng_seed):
         text=True,
         bufsize=1,
         cwd=REPO_ROOT,
+        start_new_session=True,  # own process group for SIGSTOP/SIGCONT
     )
 
+    pgid = os.getpgid(proc.pid)
     last_cov = 0
     last_cov_time = time.time()
+    refreshes = 0
     cov_pattern = re.compile(r"cov:\s+(\d+)")
 
     try:
@@ -82,16 +86,23 @@ def run_fuzzer_cycle(args, cycle_num, rng_seed):
                     last_cov = cov
                     last_cov_time = time.time()
                 elif time.time() - last_cov_time > args.plateau_secs:
-                    log(f"Plateau detected at cov={last_cov} "
-                        f"(no increase in {args.plateau_secs}s), restarting...")
-                    proc.terminate()
-                    break
+                    refreshes += 1
+                    log(f"Plateau at cov={last_cov}, refreshing seeds (#{refreshes})...")
+                    os.killpg(pgid, signal.SIGSTOP)
+                    try:
+                        rng_seed = random.randrange(2**64)
+                        generate_seeds(args, rng_seed)
+                    finally:
+                        os.killpg(pgid, signal.SIGCONT)
+                    last_cov_time = time.time()
+                    log("Fuzzer resumed with new seeds")
     except KeyboardInterrupt:
-        proc.terminate()
+        os.killpg(pgid, signal.SIGTERM)
+        proc.wait()
         raise
 
     proc.wait()
-    return last_cov
+    return last_cov, refreshes
 
 
 def main():
@@ -122,10 +133,11 @@ def main():
             log(f"=== Cycle {cycle} (seed={rng_seed}) ===")
             start = time.time()
 
-            final_cov = run_fuzzer_cycle(args, cycle, rng_seed)
+            final_cov, refreshes = run_fuzzer_cycle(args, cycle, rng_seed)
 
             elapsed = time.time() - start
-            log(f"Cycle {cycle} complete: cov={final_cov}, elapsed={elapsed:.0f}s")
+            log(f"Cycle {cycle} complete: cov={final_cov}, "
+                f"refreshes={refreshes}, elapsed={elapsed:.0f}s")
     except KeyboardInterrupt:
         log(f"Interrupted after {cycle} cycle(s)")
         sys.exit(0)

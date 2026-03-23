@@ -12,7 +12,9 @@ if [ ! -f "$FUZZ_TARGETS/ir_jit_diff.rs" ]; then
     cat > "$FUZZ_TARGETS/ir_jit_diff.rs" << 'RUSTEOF'
 #![no_main]
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use libfuzzer_sys::fuzz_target;
 use rand::rngs::StdRng;
@@ -27,10 +29,12 @@ use crate::common::ConfigTemplate;
 mod common;
 
 const K: usize = 5;
+const RELOAD_INTERVAL_SECS: u64 = 10;
 
-static IR_CORPUS: OnceLock<Vec<IrSeq>> = OnceLock::new();
+static IR_CORPUS: Mutex<Vec<IrSeq>> = Mutex::new(Vec::new());
+static LAST_RELOAD: AtomicU64 = AtomicU64::new(0);
 
-fn load_corpus() -> Vec<IrSeq> {
+fn load_corpus_from_disk() -> Vec<IrSeq> {
     let corpus_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ir-corpus");
     let mut irs = Vec::new();
     let entries = match std::fs::read_dir(&corpus_dir) {
@@ -53,6 +57,13 @@ fn load_corpus() -> Vec<IrSeq> {
     irs
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 #[derive(arbitrary::Arbitrary, Debug)]
 struct FuzzData {
     template: ConfigTemplate,
@@ -60,7 +71,15 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    let corpus = IR_CORPUS.get_or_init(load_corpus);
+    // Periodically reload corpus from disk to pick up new seeds
+    let now = now_secs();
+    let last = LAST_RELOAD.load(Ordering::Relaxed);
+    let mut corpus = IR_CORPUS.lock().unwrap();
+    if corpus.is_empty() || now.saturating_sub(last) >= RELOAD_INTERVAL_SECS {
+        *corpus = load_corpus_from_disk();
+        LAST_RELOAD.store(now, Ordering::Relaxed);
+    }
+
     if corpus.is_empty() {
         return;
     }
@@ -72,6 +91,9 @@ fuzz_target!(|data: FuzzData| {
     let selected: Vec<IrSeq> = (0..k)
         .map(|_| corpus[rng.gen_range(0..corpus.len())].clone())
         .collect();
+
+    // Release lock before expensive execution
+    drop(corpus);
 
     // Mutate: pick a base, splice from donors
     let mutated = mutate(&selected, &mut rng);
