@@ -178,7 +178,8 @@ pub fn run_diff_ir(ir: &IrSeq, mut config: Config, sbpf_version: SBPFVersion) ->
 }
 
 /// Triage a crash: print assembly, disassembly, verify status, and execution result.
-pub fn triage_ir(ir: &IrSeq, sbpf_version: SBPFVersion) {
+/// When `skip_verify` is true, execution proceeds even if verification fails.
+pub fn triage_ir(ir: &IrSeq, sbpf_version: SBPFVersion, skip_verify: bool) {
     // 1. Assembly text
     let asm = format!("{}", ir);
     println!("=== Assembly text ===");
@@ -224,11 +225,14 @@ pub fn triage_ir(ir: &IrSeq, sbpf_version: SBPFVersion) {
     }
     println!();
 
-    // 5. Execute (only if verified, to avoid panics)
+    // 5. Execute (only if verified, unless --no-verify)
     println!("=== Execution ===");
-    if verify_result.is_err() {
+    if verify_result.is_err() && !skip_verify {
         println!("  skipped (verification failed)");
         return;
+    }
+    if verify_result.is_err() {
+        println!("  WARNING: running unverified program (--no-verify)");
     }
     let result = run_executable(executable, &ir.memory);
     println!("  {:?}", result);

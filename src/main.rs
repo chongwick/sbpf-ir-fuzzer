@@ -1,5 +1,6 @@
 mod executor;
 mod gen_corpus;
+mod gen_jit_stress;
 mod gen_pqr;
 mod gen_smart;
 mod ir;
@@ -181,6 +182,7 @@ fn print_usage() {
     eprintln!("  sbpf-ir --gen-pqr [output_dir]              Generate PQR IR corpus (default: input_corpus/)");
     eprintln!("  sbpf-ir --gen-corpus [output_dir]            Generate full IR corpus (default: input_corpus/)");
     eprintln!("  sbpf-ir --gen-smart [output_dir]             Generate 1000 smart IR seeds (default: input_corpus/)");
+    eprintln!("  sbpf-ir --gen-jit-stress [output_dir]        Generate 300 JIT-stress IR seeds (default: input_corpus/)");
 }
 
 fn main() {
@@ -198,6 +200,8 @@ fn main() {
     let mut gen_pqr_mode = false;
     let mut gen_corpus_mode = false;
     let mut gen_smart_mode = false;
+    let mut gen_jit_stress_mode = false;
+    let mut no_verify = false;
     let mut input_files: Vec<String> = Vec::new();
     let mut output_path: Option<String> = None;
     let mut seed: Option<u64> = None;
@@ -223,6 +227,9 @@ fn main() {
             }
             "--gen-smart" => {
                 gen_smart_mode = true;
+            }
+            "--gen-jit-stress" => {
+                gen_jit_stress_mode = true;
             }
             "--count" => {
                 i += 1;
@@ -260,6 +267,9 @@ fn main() {
                     std::process::exit(1);
                 }
                 seed = Some(args[i].parse().expect("--seed requires a number"));
+            }
+            "--no-verify" => {
+                no_verify = true;
             }
             "--help" | "-h" => {
                 print_usage();
@@ -309,6 +319,18 @@ fn main() {
         return;
     }
 
+    // --gen-jit-stress mode
+    if gen_jit_stress_mode {
+        let dir = input_files.first().map(|s| s.as_str()).unwrap_or("input_corpus");
+        let n = count.unwrap_or(300);
+        let s = seed.unwrap_or_else(|| {
+            use rand::Rng;
+            rand::thread_rng().gen()
+        });
+        gen_jit_stress::generate(dir, n, s);
+        return;
+    }
+
     // --triage mode
     if triage_mode {
         if input_files.is_empty() {
@@ -319,7 +341,7 @@ fn main() {
         let ir = load_ir_auto(&input_files[0]);
         let sbpf_version = parse_sbpf_version(&ir.version)
             .unwrap_or_else(|| panic!("unknown SBPF version: {}", ir.version));
-        triage_ir(&ir, sbpf_version);
+        triage_ir(&ir, sbpf_version, no_verify);
         return;
     }
 

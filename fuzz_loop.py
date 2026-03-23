@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Autonomous fuzzing loop with plateau detection for ir-jit-diff.
 
-On coverage plateau: generates fresh smart seeds into the corpus directory.
-The fuzz target periodically reloads its corpus from disk (every 10s), so new
-seeds are picked up without restarting the fuzzer or losing coverage.
+On coverage plateau: generates fresh seeds (smart or JIT-stress) into the
+corpus directory. The fuzz target periodically reloads its corpus from disk
+(every 10s), so new seeds are picked up without restarting the fuzzer or
+losing coverage.
 
 Run from the repo root:  python3 fuzz_loop.py
 """
@@ -27,7 +28,7 @@ def log(msg):
     print(f"[fuzz_loop] {msg}", flush=True)
 
 
-def generate_seeds(args, rng_seed):
+def generate_smart_seeds(args, rng_seed):
     """Generate smart IR seeds via sbpf-ir --gen-smart."""
     cmd = [
         "cargo", "run", "--manifest-path", os.path.join(REPO_ROOT, "tools/Cargo.toml"),
@@ -39,7 +40,28 @@ def generate_seeds(args, rng_seed):
     log(f"Generating {args.smart_count} smart seeds (seed={rng_seed})...")
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
     if result.returncode != 0:
-        log(f"WARNING: seed generation failed (exit {result.returncode})")
+        log(f"WARNING: smart seed generation failed (exit {result.returncode})")
+        if result.stderr:
+            for line in result.stderr.strip().splitlines()[-5:]:
+                log(f"  {line}")
+    else:
+        for line in result.stdout.strip().splitlines():
+            log(line)
+
+
+def generate_jit_stress_seeds(args, rng_seed):
+    """Generate JIT-stress IR seeds via sbpf-ir --gen-jit-stress."""
+    cmd = [
+        "cargo", "run", "--manifest-path", os.path.join(REPO_ROOT, "tools/Cargo.toml"),
+        "--release", "--",
+        "--gen-jit-stress", args.corpus_dir,
+        "--seed", str(rng_seed),
+        "--count", str(args.jit_stress_count),
+    ]
+    log(f"Generating {args.jit_stress_count} JIT-stress seeds (seed={rng_seed})...")
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+    if result.returncode != 0:
+        log(f"WARNING: JIT-stress seed generation failed (exit {result.returncode})")
         if result.stderr:
             for line in result.stderr.strip().splitlines()[-5:]:
                 log(f"  {line}")
@@ -50,7 +72,9 @@ def generate_seeds(args, rng_seed):
 
 def run_fuzzer(args, initial_seed):
     """Run the fuzzer, refreshing seeds on plateau. Returns (final_cov, refresh_count)."""
-    generate_seeds(args, initial_seed)
+    # Initial seed generation: both smart + JIT-stress
+    generate_smart_seeds(args, initial_seed)
+    generate_jit_stress_seeds(args, initial_seed ^ 0xdeadbeef)
 
     cmd = ["cargo", "+nightly", "fuzz", "run", "ir-jit-diff"]
     if args.max_cycle_secs > 0:
@@ -87,9 +111,14 @@ def run_fuzzer(args, initial_seed):
                     # keeps running. The fuzz target hot-reloads its corpus
                     # from disk every 10s, so it will pick these up.
                     refreshes += 1
-                    log(f"Plateau at cov={last_cov}, refreshing seeds (#{refreshes})...")
                     rng_seed = random.randrange(2**64)
-                    generate_seeds(args, rng_seed)
+                    # Every 3rd refresh is JIT-stress-only, others are smart-only
+                    if refreshes % 3 == 0:
+                        log(f"Plateau at cov={last_cov}, refreshing JIT-stress seeds (#{refreshes})...")
+                        generate_jit_stress_seeds(args, rng_seed)
+                    else:
+                        log(f"Plateau at cov={last_cov}, refreshing smart seeds (#{refreshes})...")
+                        generate_smart_seeds(args, rng_seed)
                     last_cov_time = time.time()
                     log(f"New seeds written, fuzzer will reload within ~10s")
     except KeyboardInterrupt:
@@ -108,6 +137,8 @@ def main():
                         help="IR corpus directory (default: fuzz/ir-corpus)")
     parser.add_argument("--smart-count", type=int, default=1000,
                         help="Number of smart seeds per cycle (default: 1000)")
+    parser.add_argument("--jit-stress-count", type=int, default=300,
+                        help="Number of JIT-stress seeds per cycle (default: 300)")
     parser.add_argument("--plateau-secs", type=int, default=120,
                         help="Seconds without cov increase to declare plateau (default: 120)")
     parser.add_argument("--max-cycle-secs", type=int, default=0,
@@ -116,7 +147,7 @@ def main():
 
     log(f"Repo root: {REPO_ROOT}")
     log(f"Config: corpus_dir={args.corpus_dir}, smart_count={args.smart_count}, "
-        f"plateau_secs={args.plateau_secs}, "
+        f"jit_stress_count={args.jit_stress_count}, plateau_secs={args.plateau_secs}, "
         f"max_cycle_secs={'unlimited' if args.max_cycle_secs == 0 else args.max_cycle_secs}")
 
     rng_seed = random.randrange(2**64)
