@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Autonomous fuzzing loop with plateau detection for ir-jit-diff.
 
-On coverage plateau: pauses the fuzzer (SIGSTOP), generates fresh smart seeds,
-then resumes (SIGCONT). The fuzz target periodically reloads its corpus from
-disk, so new seeds are picked up without losing accumulated coverage.
+On coverage plateau: generates fresh smart seeds into the corpus directory.
+The fuzz target periodically reloads its corpus from disk (every 10s), so new
+seeds are picked up without restarting the fuzzer or losing coverage.
 
 Run from the repo root:  python3 fuzz_loop.py
 """
@@ -48,14 +48,13 @@ def generate_seeds(args, rng_seed):
             log(line)
 
 
-def run_fuzzer_cycle(args, cycle_num, initial_seed):
-    """Run one fuzzer cycle. Returns (final_cov, refresh_count)."""
+def run_fuzzer(args, initial_seed):
+    """Run the fuzzer, refreshing seeds on plateau. Returns (final_cov, refresh_count)."""
     generate_seeds(args, initial_seed)
 
-    cmd = [
-        "cargo", "+nightly", "fuzz", "run", "ir-jit-diff", "--",
-        f"-max_total_time={args.max_cycle_secs}",
-    ]
+    cmd = ["cargo", "+nightly", "fuzz", "run", "ir-jit-diff"]
+    if args.max_cycle_secs > 0:
+        cmd += ["--", f"-max_total_time={args.max_cycle_secs}"]
     log("Starting fuzzer...")
 
     proc = subprocess.Popen(
@@ -65,10 +64,8 @@ def run_fuzzer_cycle(args, cycle_num, initial_seed):
         text=True,
         bufsize=1,
         cwd=REPO_ROOT,
-        start_new_session=True,  # own process group for SIGSTOP/SIGCONT
     )
 
-    pgid = os.getpgid(proc.pid)
     last_cov = 0
     last_cov_time = time.time()
     refreshes = 0
@@ -86,18 +83,17 @@ def run_fuzzer_cycle(args, cycle_num, initial_seed):
                     last_cov = cov
                     last_cov_time = time.time()
                 elif time.time() - last_cov_time > args.plateau_secs:
+                    # Plateau detected — generate new seeds while fuzzer
+                    # keeps running. The fuzz target hot-reloads its corpus
+                    # from disk every 10s, so it will pick these up.
                     refreshes += 1
                     log(f"Plateau at cov={last_cov}, refreshing seeds (#{refreshes})...")
-                    os.killpg(pgid, signal.SIGSTOP)
-                    try:
-                        rng_seed = random.randrange(2**64)
-                        generate_seeds(args, rng_seed)
-                    finally:
-                        os.killpg(pgid, signal.SIGCONT)
+                    rng_seed = random.randrange(2**64)
+                    generate_seeds(args, rng_seed)
                     last_cov_time = time.time()
-                    log("Fuzzer resumed with new seeds")
+                    log(f"New seeds written, fuzzer will reload within ~10s")
     except KeyboardInterrupt:
-        os.killpg(pgid, signal.SIGTERM)
+        proc.terminate()
         proc.wait()
         raise
 
@@ -114,35 +110,28 @@ def main():
                         help="Number of smart seeds per cycle (default: 1000)")
     parser.add_argument("--plateau-secs", type=int, default=120,
                         help="Seconds without cov increase to declare plateau (default: 120)")
-    parser.add_argument("--max-cycle-secs", type=int, default=600,
-                        help="Max seconds per fuzzer cycle (default: 600)")
-    parser.add_argument("--cycles", type=int, default=0,
-                        help="Number of cycles to run, 0=unlimited (default: 0)")
+    parser.add_argument("--max-cycle-secs", type=int, default=0,
+                        help="Max seconds per fuzzer run, 0=unlimited (default: 0)")
     args = parser.parse_args()
 
     log(f"Repo root: {REPO_ROOT}")
     log(f"Config: corpus_dir={args.corpus_dir}, smart_count={args.smart_count}, "
-        f"plateau_secs={args.plateau_secs}, max_cycle_secs={args.max_cycle_secs}, "
-        f"cycles={'unlimited' if args.cycles == 0 else args.cycles}")
+        f"plateau_secs={args.plateau_secs}, "
+        f"max_cycle_secs={'unlimited' if args.max_cycle_secs == 0 else args.max_cycle_secs}")
 
-    cycle = 0
+    rng_seed = random.randrange(2**64)
+    log(f"=== Starting (seed={rng_seed}) ===")
+    start = time.time()
+
     try:
-        while args.cycles == 0 or cycle < args.cycles:
-            cycle += 1
-            rng_seed = random.randrange(2**64)
-            log(f"=== Cycle {cycle} (seed={rng_seed}) ===")
-            start = time.time()
-
-            final_cov, refreshes = run_fuzzer_cycle(args, cycle, rng_seed)
-
-            elapsed = time.time() - start
-            log(f"Cycle {cycle} complete: cov={final_cov}, "
-                f"refreshes={refreshes}, elapsed={elapsed:.0f}s")
+        final_cov, refreshes = run_fuzzer(args, rng_seed)
     except KeyboardInterrupt:
-        log(f"Interrupted after {cycle} cycle(s)")
+        elapsed = time.time() - start
+        log(f"Interrupted: elapsed={elapsed:.0f}s")
         sys.exit(0)
 
-    log(f"Finished {cycle} cycle(s)")
+    elapsed = time.time() - start
+    log(f"Done: cov={final_cov}, refreshes={refreshes}, elapsed={elapsed:.0f}s")
 
 
 if __name__ == "__main__":

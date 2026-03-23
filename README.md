@@ -164,34 +164,35 @@ python3 fuzz_loop.py
 
 ### Autonomous fuzzing loop
 
-`fuzz_loop.py` runs an autonomous cycle of seed generation, fuzzing, and plateau detection:
+`fuzz_loop.py` runs the fuzzer continuously, monitoring coverage and refreshing seeds on plateau:
 
 ```
-┌──────────────────┐     ┌───────────────┐     ┌────────────────────┐
-│  Generate smart  │────►│  Run fuzzer   │────►│  Plateau detected  │──┐
-│  seeds (sbpf-ir) │     │  (libfuzzer)  │     │  or time expired   │  │
-└──────────────────┘     └───────────────┘     └────────────────────┘  │
-        ▲                                                              │
-        └──────────────────────────────────────────────────────────────┘
+┌──────────────────┐     ┌───────────────────────────────────────────┐
+│  Generate smart  │────►│  Run fuzzer, stream output, track cov:   │
+│  seeds (sbpf-ir) │     │                                           │
+└──────────────────┘     │  On plateau: generate new seeds in-place  │◄─┐
+                         │  (fuzzer hot-reloads corpus every ~10s)   │  │
+                         └───────────────────────────────────────────┘  │
+                                          │ plateau                     │
+                                          └─────────────────────────────┘
 ```
 
-The `ir-jit-diff` target loads its corpus once at startup (`OnceLock`), so new seeds require a fuzzer restart. The loop handles this automatically.
+The `ir-jit-diff` target hot-reloads `fuzz/ir-corpus/*.ir` from disk every 10 seconds. When `fuzz_loop.py` detects a coverage plateau, it writes new seeds into the corpus directory while the fuzzer keeps running — no restart, no lost coverage.
 
 **Options:**
 
 | Flag | Default | Description |
 |---|---|---|
 | `--corpus-dir` | `fuzz/ir-corpus` | IR corpus directory |
-| `--smart-count` | 1000 | Smart seeds generated per cycle |
-| `--plateau-secs` | 120 | Seconds without coverage increase to trigger restart |
-| `--max-cycle-secs` | 600 | Max seconds per fuzzer cycle |
-| `--cycles` | 0 (unlimited) | Number of cycles to run |
+| `--smart-count` | 1000 | Smart seeds generated per refresh |
+| `--plateau-secs` | 120 | Seconds without coverage increase to trigger seed refresh |
+| `--max-cycle-secs` | 0 (unlimited) | Max seconds before fuzzer exits |
 
 **Examples:**
 
 ```bash
-# Quick test: 2 short cycles
-python3 fuzz_loop.py --cycles 2 --plateau-secs 30 --max-cycle-secs 60 --smart-count 100
+# Quick test: short plateau window, small seed count
+python3 fuzz_loop.py --plateau-secs 30 --max-cycle-secs 120 --smart-count 100
 
 # Full autonomous run (Ctrl+C to stop)
 python3 fuzz_loop.py
