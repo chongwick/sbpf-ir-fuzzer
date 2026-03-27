@@ -1,8 +1,8 @@
-pub mod executor;
-pub mod gen_corpus;
-pub mod gen_jit_stress;
-pub mod gen_pqr;
-pub mod gen_smart;
+#![warn(missing_docs)]
+
+//! IR-based sBPF stress generation and lowering helpers.
+
+pub mod generator;
 pub mod ir;
-pub mod mutator;
-pub mod semantic_aware;
+pub mod lowering;
+pub mod validate;

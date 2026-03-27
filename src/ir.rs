@@ -1,151 +1,315 @@
-use serde::{Deserialize, Serialize};
-use std::fmt;
+//! Core IR definitions for sBPF fuzzing.
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct IrNode {
-    pub op: String,
-    pub operands: Vec<String>,
+/// sBPF register identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Reg {
+    /// Return value register.
+    R0,
+    /// Argument register.
+    R1,
+    /// Argument register.
+    R2,
+    /// Argument register.
+    R3,
+    /// Argument register.
+    R4,
+    /// Argument register.
+    R5,
+    /// Callee-save/general register.
+    R6,
+    /// Callee-save/general register.
+    R7,
+    /// Callee-save/general register.
+    R8,
+    /// Callee-save/general register.
+    R9,
+    /// Frame pointer register.
+    FP,
 }
 
-impl fmt::Display for IrNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.op)?;
-        for (i, operand) in self.operands.iter().enumerate() {
-            if i == 0 {
-                write!(f, " {}", operand)?;
-            } else {
-                write!(f, ", {}", operand)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct IrSeq {
-    pub version: String,
-    pub memory: Vec<u8>,
-    pub regions: Vec<(String, Vec<IrNode>)>,
-    #[serde(skip)]
-    generated_ids: Vec<String>,
-    #[serde(skip)]
-    current_region: usize,
-    #[serde(skip)]
-    next_id: u64,
-}
-
-impl IrSeq {
-    pub fn new(version: &str, memory: Vec<u8>) -> Self {
-        let mut seq = IrSeq {
-            version: version.to_string(),
-            memory,
-            regions: Vec::new(),
-            generated_ids: Vec::new(),
-            current_region: 0,
-            next_id: 0,
-        };
-        let id = seq.generate_id();
-        seq.regions.push((id, Vec::new()));
-        seq
-    }
-
-    fn generate_id(&mut self) -> String {
-        let id = format!("__region_{}", self.next_id);
-        self.next_id += 1;
-        self.generated_ids.push(id.clone());
-        id
-    }
-
-    fn add_node(&mut self, node: IrNode) {
-        self.regions[self.current_region].1.push(node);
-    }
-
-    fn change_region(&mut self, name: &str) {
-        if name.is_empty() {
-            let id = self.generate_id();
-            self.regions.push((id, Vec::new()));
-            self.current_region = self.regions.len() - 1;
-        } else if let Some(idx) = self.regions.iter().position(|(id, _)| id == name) {
-            self.current_region = idx;
-        } else {
-            self.regions.push((name.to_string(), Vec::new()));
-            self.current_region = self.regions.len() - 1;
-        }
-    }
-}
-
-impl fmt::Display for IrSeq {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (region_id, nodes) in &self.regions {
-            if nodes.is_empty() {
-                continue;
-            }
-            if !self.generated_ids.contains(region_id) {
-                writeln!(f, "{}:", region_id)?;
-            }
-            for node in nodes {
-                writeln!(f, "{}", node)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-fn is_conditional_branch(op: &str) -> bool {
-    matches!(
-        op,
-        "jeq" | "jgt" | "jge" | "jlt" | "jle" | "jset" | "jne"
-            | "jsgt" | "jsge" | "jslt" | "jsle"
-            | "jeq32" | "jgt32" | "jge32" | "jlt32" | "jle32" | "jset32" | "jne32"
-            | "jsgt32" | "jsge32" | "jslt32" | "jsle32"
-    )
-}
-
-fn is_unconditional_jump(op: &str) -> bool {
-    op == "ja"
-}
-
-pub fn sbpf2ir(code: &str, memory: Vec<u8>, version: &str) -> IrSeq {
-    let mut ir_seq = IrSeq::new(version, memory);
-    let mut need_new_region = false;
-
-    for line in code.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if trimmed.ends_with(':') {
-            let label = &trimmed[..trimmed.len() - 1];
-            ir_seq.change_region(label);
-            need_new_region = false;
-            continue;
-        }
-
-        if need_new_region {
-            ir_seq.change_region("");
-            need_new_region = false;
-        }
-
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let op = parts[0];
-        let operands: Vec<String> = parts[1..]
-            .iter()
-            .map(|s| s.trim_end_matches(',').to_string())
-            .collect();
-
-        ir_seq.add_node(IrNode {
-            op: op.to_string(),
-            operands: operands.clone(),
-        });
-
-        if is_conditional_branch(op) || is_unconditional_jump(op) || op == "exit" {
-            need_new_region = true;
+impl Reg {
+    /// Returns raw register index.
+    pub fn index(&self) -> u8 {
+        match self {
+            Reg::R0 => 0,
+            Reg::R1 => 1,
+            Reg::R2 => 2,
+            Reg::R3 => 3,
+            Reg::R4 => 4,
+            Reg::R5 => 5,
+            Reg::R6 => 6,
+            Reg::R7 => 7,
+            Reg::R8 => 8,
+            Reg::R9 => 9,
+            Reg::FP => 10,
         }
     }
 
-    ir_seq
+    /// Returns whether register can be written.
+    pub fn is_writable(&self) -> bool {
+        !matches!(self, Reg::FP)
+    }
 }
+
+/// Instruction source value.
+#[derive(Debug, Clone)]
+pub enum Value {
+    /// Immediate value.
+    Imm(i64),
+    /// Register source.
+    Register(Reg),
+}
+
+/// ALU operations.
+#[derive(Debug, Clone, Copy)]
+pub enum AluOp {
+    /// Add.
+    Add,
+    /// Subtract.
+    Sub,
+    /// Multiply.
+    Mul,
+    /// Divide.
+    Div,
+    /// Modulo.
+    Mod,
+    /// Bitwise OR.
+    Or,
+    /// Bitwise AND.
+    And,
+    /// Bitwise XOR.
+    Xor,
+    /// Left shift.
+    Lsh,
+    /// Logical right shift.
+    Rsh,
+    /// Arithmetic right shift.
+    Arsh,
+}
+
+/// Branch condition.
+#[derive(Debug, Clone, Copy)]
+pub enum Cond {
+    /// Equal.
+    Eq,
+    /// Not equal.
+    Ne,
+    /// Signed greater than.
+    Gt,
+    /// Signed greater or equal.
+    Ge,
+    /// Signed less than.
+    Lt,
+    /// Signed less or equal.
+    Le,
+    /// Unsigned greater than.
+    Gtu,
+    /// Unsigned greater or equal.
+    Geu,
+    /// Unsigned less than.
+    Ltu,
+    /// Unsigned less or equal.
+    Leu,
+}
+
+/// Memory width.
+#[derive(Debug, Clone, Copy)]
+pub enum MemSize {
+    /// 1-byte access.
+    B1,
+    /// 2-byte access.
+    B2,
+    /// 4-byte access.
+    B4,
+    /// 8-byte access.
+    B8,
+}
+
+/// Selected syscall IDs.
+#[derive(Debug, Clone, Copy)]
+pub enum SyscallId {
+    /// sol_log
+    SolLog,
+    /// sol_log_data
+    SolLogData,
+    /// sol_log_pubkey
+    SolLogPubkey,
+    /// sol_alloc_free
+    SolAllocFree,
+    /// sol_memcpy
+    SolMemcpy,
+    /// sol_memset
+    SolMemset,
+    /// sol_memmove
+    SolMemmove,
+    /// sol_memcmp
+    SolMemcmp,
+    /// abort
+    Abort,
+    /// panic
+    Panic,
+}
+
+/// Fake dependency expansion strategy.
+#[derive(Debug, Clone, Copy)]
+pub enum FakeDepStrategy {
+    /// Emit xor with zero.
+    XorZero,
+    /// Emit self move.
+    MovSelf,
+    /// Emit add/sub identity pair.
+    AddSubPair,
+}
+
+/// Stack pressure expansion strategy.
+#[derive(Debug, Clone)]
+pub enum StackPressureStrategy {
+    /// Dead stack writes.
+    DeadAlloc,
+    /// Spill then reload selected register.
+    SpillReload {
+        /// Register to spill and reload.
+        reg: Reg,
+    },
+    /// Deep internal call nesting.
+    DeepNesting {
+        /// Call nesting depth.
+        depth: u32,
+    },
+}
+
+/// Alias categories for pointer probes.
+#[derive(Debug, Clone)]
+pub enum AliasClass {
+    /// Overlapping stack pointers.
+    StackOverlap {
+        /// First stack offset.
+        offset_a: i16,
+        /// Second stack offset.
+        offset_b: i16,
+    },
+    /// Two input-region pointers.
+    InputRegion {
+        /// First input offset.
+        offset_a: i16,
+        /// Second input offset.
+        offset_b: i16,
+    },
+    /// One stack and one input pointer.
+    CrossRegion,
+}
+
+/// IR instruction.
+#[derive(Debug, Clone)]
+pub enum IrInstr {
+    /// ALU operation.
+    Alu {
+        /// Destination register.
+        dst: Reg,
+        /// Arithmetic/logical operation.
+        op: AluOp,
+        /// Source operand.
+        src: Value,
+    },
+    /// Move operation.
+    Mov {
+        /// Destination register.
+        dst: Reg,
+        /// Source operand.
+        src: Value,
+    },
+    /// Memory load.
+    Load {
+        /// Destination register.
+        dst: Reg,
+        /// Base register.
+        base: Reg,
+        /// Offset from base.
+        offset: i16,
+        /// Access width.
+        size: MemSize,
+    },
+    /// Memory store.
+    Store {
+        /// Base register.
+        base: Reg,
+        /// Offset from base.
+        offset: i16,
+        /// Source value.
+        src: Value,
+        /// Access width.
+        size: MemSize,
+    },
+    /// Conditional branch.
+    Br {
+        /// Branch condition.
+        cond: Cond,
+        /// LHS register.
+        lhs: Reg,
+        /// RHS value.
+        rhs: Value,
+        /// Target region index.
+        target: usize,
+    },
+    /// Unconditional branch.
+    BrUncond {
+        /// Target region index.
+        target: usize,
+    },
+    /// Internal call.
+    Call {
+        /// Target region index.
+        target: usize,
+    },
+    /// Function return.
+    Return,
+    /// Syscall invocation.
+    Syscall {
+        /// Syscall kind.
+        id: SyscallId,
+        /// Positional args for r1-r5.
+        args: [Option<Value>; 5],
+    },
+    /// Fake dependency meta instruction.
+    FakeDep {
+        /// Register to create dependency on.
+        reg: Reg,
+        /// Expansion strategy.
+        strategy: FakeDepStrategy,
+    },
+    /// Stack pressure meta instruction.
+    StackPressure {
+        /// Requested bytes.
+        bytes: u32,
+        /// Expansion strategy.
+        strategy: StackPressureStrategy,
+    },
+    /// Alias analysis meta instruction.
+    AliasProbe {
+        /// Primary pointer register to set up.
+        ptr: Reg,
+        /// Alias setup class.
+        alias_class: AliasClass,
+    },
+}
+
+/// Basic region in a sequence.
+#[derive(Debug, Clone)]
+pub struct BasicRegion {
+    /// Human readable label.
+    pub label: String,
+    /// Region instructions.
+    pub instructions: Vec<IrInstr>,
+}
+
+/// Full IR sequence.
+#[derive(Debug, Clone)]
+pub struct Sequence {
+    /// Regions in layout order.
+    pub regions: Vec<BasicRegion>,
+    /// Entry region index.
+    pub entry_region: usize,
+}
+
+/// Public IR alias.
+pub type IR = Sequence;
