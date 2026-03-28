@@ -146,6 +146,10 @@ fn random_writable_reg(rng: &mut impl Rng) -> Reg {
     }
 }
 
+fn random_stack_offset(rng: &mut impl Rng) -> i16 {
+    -8 * rng.gen_range(1_i16..=64_i16)
+}
+
 fn random_alias(rng: &mut impl Rng) -> AliasClass {
     match rng.gen_range(0..3) {
         0 => AliasClass::CrossRegion,
@@ -157,6 +161,126 @@ fn random_alias(rng: &mut impl Rng) -> AliasClass {
             offset_a: 8,
             offset_b: 24,
         },
+    }
+}
+
+/// Generate a high-complexity stress IR intended to lower into large sBPF programs.
+///
+/// `min_regions` controls CFG breadth and `target_insns_per_region` controls region density.
+pub fn gen_complex_stress(
+    rng: &mut impl Rng,
+    min_regions: usize,
+    target_insns_per_region: usize,
+) -> IR {
+    let region_count = min_regions.max(6);
+    let per_region = target_insns_per_region.max(8);
+    let mut regions = Vec::with_capacity(region_count);
+
+    for i in 0..region_count {
+        let mut instructions = Vec::new();
+        instructions.push(IrInstr::Mov {
+            dst: Reg::R0,
+            src: Value::Imm(i as i64),
+        });
+        instructions.push(IrInstr::Mov {
+            dst: Reg::R2,
+            src: Value::Imm(rng.gen_range(1_i64..64_i64)),
+        });
+
+        let reserve_terminal = if i + 1 == region_count {
+            1
+        } else if i % 3 == 2 {
+            2
+        } else {
+            1
+        };
+        while instructions.len() + reserve_terminal < per_region {
+            match rng.gen_range(0..7) {
+                0 => instructions.push(IrInstr::Alu {
+                    dst: random_writable_reg(rng),
+                    op: AluOp::Add,
+                    src: Value::Imm(rng.gen_range(-32_i64..128_i64)),
+                }),
+                1 => instructions.push(IrInstr::FakeDep {
+                    reg: random_writable_reg(rng),
+                    strategy: FakeDepStrategy::AddSubPair,
+                }),
+                2 => instructions.push(IrInstr::FakeDep {
+                    reg: random_writable_reg(rng),
+                    strategy: FakeDepStrategy::MovSelf,
+                }),
+                3 => instructions.push(IrInstr::StackPressure {
+                    bytes: rng.gen_range(16_u32..=256_u32),
+                    strategy: if rng.gen_bool(0.7) {
+                        StackPressureStrategy::DeadAlloc
+                    } else {
+                        StackPressureStrategy::SpillReload {
+                            reg: random_writable_reg(rng),
+                        }
+                    },
+                }),
+                4 => instructions.push(IrInstr::AliasProbe {
+                    ptr: random_writable_reg(rng),
+                    alias_class: random_alias(rng),
+                }),
+                5 => instructions.push(IrInstr::Store {
+                    // Keep memory writes in verifier-friendly stack space.
+                    base: Reg::FP,
+                    offset: random_stack_offset(rng),
+                    src: if rng.gen_bool(0.5) {
+                        Value::Imm(rng.gen_range(-1024_i64..=1024_i64))
+                    } else {
+                        Value::Register(random_writable_reg(rng))
+                    },
+                    size: crate::ir::MemSize::B8,
+                }),
+                _ => instructions.push(IrInstr::Syscall {
+                    id: SyscallId::SolLog,
+                    args: [
+                        Some(Value::Register(Reg::R1)),
+                        Some(Value::Register(Reg::R2)),
+                        Some(Value::Register(Reg::R3)),
+                        None,
+                        None,
+                    ],
+                }),
+            }
+        }
+
+        if i + 1 == region_count {
+            instructions.push(IrInstr::Return);
+        } else {
+            let branch_target = (i + rng.gen_range(2..region_count)) % region_count;
+            match i % 3 {
+                0 => instructions.push(IrInstr::Br {
+                    cond: Cond::Gtu,
+                    lhs: Reg::R2,
+                    rhs: Value::Imm(rng.gen_range(1_i64..64_i64)),
+                    target: branch_target,
+                }),
+                1 => instructions.push(IrInstr::BrUncond {
+                    target: branch_target,
+                }),
+                _ => {
+                    instructions.push(IrInstr::Call {
+                        target: branch_target,
+                    });
+                    instructions.push(IrInstr::BrUncond {
+                        target: (i + 1) % region_count,
+                    });
+                }
+            }
+        }
+
+        regions.push(BasicRegion {
+            label: format!("complex_{i}"),
+            instructions,
+        });
+    }
+
+    IR {
+        regions,
+        entry_region: 0,
     }
 }
 
